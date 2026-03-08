@@ -13,11 +13,12 @@ import { Downloader } from './download/downloader.js';
 import { ProgressReporter } from './download/progress.js';
 import { extractText } from './indexing/text-extractor.js';
 import { HaikuIndexer } from './indexing/haiku-indexer.js';
+import { ProviderRegistry } from './providers/registry.js';
 import { SemanticScholarProvider } from './providers/semantic-scholar.js';
 import { ArxivProvider } from './providers/arxiv.js';
 import { CrossRefProvider } from './providers/crossref.js';
 import { AnnasArchiveProvider } from './providers/annas-archive.js';
-import type { PaperProvider, PaperSearchResult, IndexedPaper } from './types.js';
+import type { PaperSearchResult, IndexedPaper } from './types.js';
 
 // --- Zod Schemas ---
 
@@ -84,11 +85,11 @@ export class PapercutServer {
   private downloader!: Downloader;
   private progress!: ProgressReporter;
   private indexer!: HaikuIndexer;
-  private providers: Map<string, PaperProvider> = new Map();
+  private registry!: ProviderRegistry;
 
   constructor() {
     this.server = new Server(
-      { name: 'papercut', version: '1.0.0' },
+      { name: 'papercut', version: '2.0.0' },
       { capabilities: { tools: {} } }
     );
 
@@ -108,16 +109,17 @@ export class PapercutServer {
     this.progress = new ProgressReporter(this.server);
     this.indexer = new HaikuIndexer();
 
-    // Register providers
-    const s2 = new SemanticScholarProvider(this.config.semanticScholarApiKey);
-    const arxiv = new ArxivProvider();
-    const crossref = new CrossRefProvider(this.config.crossrefEmail);
-    const annas = new AnnasArchiveProvider();
+    // Provider registry
+    this.registry = new ProviderRegistry();
+    this.registry.register(new SemanticScholarProvider(this.config.semanticScholarApiKey));
+    this.registry.register(new ArxivProvider());
+    this.registry.register(new CrossRefProvider(this.config.crossrefEmail));
+    this.registry.register(new AnnasArchiveProvider());
 
-    this.providers.set(s2.id, s2);
-    this.providers.set(arxiv.id, arxiv);
-    this.providers.set(crossref.id, crossref);
-    this.providers.set(annas.id, annas);
+    // Apply config overrides (enabled/disabled, priority)
+    if (Object.keys(this.config.providers).length > 0) {
+      this.registry.applyConfig(this.config.providers);
+    }
   }
 
   private setupHandlers() {
@@ -271,15 +273,14 @@ export class PapercutServer {
   private async handleSearchPapers(args: any, progressToken?: string | number) {
     const { query, providers, limit, year, yearRange } = SearchPapersSchema.parse(args);
 
-    const providerIds = providers && providers.length > 0
-      ? providers
-      : [...this.providers.keys()];
+    // Use specified providers or all enabled search-capable providers
+    const searchProviders = providers && providers.length > 0
+      ? providers.map(id => this.registry.get(id)).filter((p): p is NonNullable<typeof p> => !!p)
+      : this.registry.getByCapability('search');
 
     const results = await Promise.allSettled(
-      providerIds.map(async (id) => {
-        const provider = this.providers.get(id);
-        if (!provider) throw new Error(`Unknown provider: ${id}`);
-        return { id, results: await provider.search(query, limit, { year, yearRange }) };
+      searchProviders.map(async (provider) => {
+        return { id: provider.id, name: provider.name, results: await provider.search(query, limit, { year, yearRange }) };
       })
     );
 
@@ -295,20 +296,25 @@ export class PapercutServer {
         continue;
       }
 
-      const { id, results: papers } = result.value;
+      const { name, results: papers } = result.value;
       totalResults += papers.length;
-      const providerName = this.providers.get(id)?.name || id;
-      output += `## ${providerName} (${papers.length} results)\n\n`;
+      output += `## ${name} (${papers.length} results)\n\n`;
 
       for (const paper of papers) {
         output += this.formatSearchResult(paper);
       }
     }
 
-    if (totalResults === 0 && failedProviders === providerIds.length) {
+    if (totalResults === 0 && failedProviders === searchProviders.length) {
       output += `All ${failedProviders} provider(s) failed. This is likely a network issue.\n`;
     } else if (totalResults === 0) {
       output += `No results found. Try different keywords or broader terms.\n`;
+    }
+
+    // Suggest disabled providers
+    const disabled = this.registry.getDisabled().filter(p => p.capabilities.search);
+    if (disabled.length > 0 && totalResults < limit) {
+      output += `\n---\n**Disabled providers:** ${disabled.map(p => p.name).join(', ')} — enable in config for broader coverage.\n`;
     }
 
     return { content: [{ type: 'text', text: output }] };
@@ -321,7 +327,7 @@ export class PapercutServer {
 
     // Get paper details from provider if needed
     let paperDetails: PaperSearchResult | null = null;
-    const prov = this.providers.get(provider);
+    const prov = this.registry.get(provider);
     if (prov?.getDetails) {
       try {
         paperDetails = await prov.getDetails(externalId);
@@ -355,10 +361,17 @@ export class PapercutServer {
       }
     }
 
-    // Try Unpaywall as fallback for DOI-identified papers
+    // Try OA discovery providers as fallback for DOI-identified papers
     if (urls.length === 0 && doi) {
-      const unpaywallUrl = await this.resolveUnpaywall(doi);
-      if (unpaywallUrl) urls.push(unpaywallUrl);
+      const oaProviders = this.registry.getByCapability('oaDiscovery');
+      for (const oaProv of oaProviders) {
+        if (oaProv.resolveDownloadUrl) {
+          try {
+            const oaUrl = await oaProv.resolveDownloadUrl(doi);
+            if (oaUrl) { urls.push(oaUrl); break; }
+          } catch {}
+        }
+      }
     }
 
     if (urls.length === 0) {
@@ -632,36 +645,26 @@ export class PapercutServer {
   private async handleGetCitations(args: any) {
     const { paperId, limit } = GetCitationsSchema.parse(args);
 
-    const s2 = this.providers.get('semantic-scholar') as SemanticScholarProvider | undefined;
-    if (!s2) return { content: [{ type: 'text', text: 'Semantic Scholar provider not available.' }] };
-
-    const citations = await s2.getCitations(paperId, limit);
-
-    if (citations.length === 0) {
-      return { content: [{ type: 'text', text: 'No citations found.' }] };
+    // Cascade through all providers with citation capability
+    const citationProviders = this.registry.getByCapability('citations');
+    if (citationProviders.length === 0) {
+      return { content: [{ type: 'text', text: 'No citation-capable providers available.' }] };
     }
 
-    let output = `# Citations for ${paperId} (${citations.length} results)\n\n`;
-    for (const paper of citations) {
-      output += this.formatSearchResult(paper);
+    for (const provider of citationProviders) {
+      try {
+        const citations = await provider.getCitations!(paperId, limit);
+        if (citations.length > 0) {
+          let output = `# Citations for ${paperId} via ${provider.name} (${citations.length} results)\n\n`;
+          for (const paper of citations) {
+            output += this.formatSearchResult(paper);
+          }
+          return { content: [{ type: 'text', text: output }] };
+        }
+      } catch { continue; }
     }
 
-    return { content: [{ type: 'text', text: output }] };
-  }
-
-  // --- Helpers ---
-
-  private async resolveUnpaywall(doi: string): Promise<string | null> {
-    try {
-      const email = this.config.crossrefEmail || 'papercut@example.com';
-      const url = `https://api.unpaywall.org/v2/${encodeURIComponent(doi)}?email=${encodeURIComponent(email)}`;
-      const response = await fetch(url, { signal: AbortSignal.timeout(10_000) });
-      if (!response.ok) return null;
-      const data = await response.json() as any;
-      return data?.best_oa_location?.url_for_pdf || data?.best_oa_location?.url || null;
-    } catch {
-      return null;
-    }
+    return { content: [{ type: 'text', text: 'No citations found across any provider.' }] };
   }
 
   // --- Formatting ---

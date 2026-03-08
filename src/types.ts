@@ -41,6 +41,10 @@ export interface IndexedPaper {
   file_format?: string;
   indexing_status: 'pending' | 'indexed' | 'failed' | 'skipped';
   indexing_error?: string;
+  openalex_id?: string;
+  core_id?: string;
+  open_access?: boolean;
+  oa_url?: string;
 }
 
 export interface HaikuIndexResult {
@@ -68,13 +72,39 @@ export interface SearchOptions {
   yearRange?: { from?: number; to?: number };
 }
 
+export interface ProviderConfig {
+  enabled: boolean;
+  priority?: number;
+  apiKey?: string;
+  email?: string;
+}
+
+export interface ProviderCapabilities {
+  search: boolean;
+  details: boolean;
+  citations: boolean;
+  references: boolean;
+  download: boolean;
+  doiLookup: boolean;
+  oaDiscovery: boolean;
+}
+
+export interface SearchFilterOptions {
+  year?: number;
+  yearRange?: { from?: number; to?: number };
+}
+
 export interface PaperProvider {
   id: string;
   name: string;
-  search(query: string, limit: number, options?: { year?: number; yearRange?: { from?: number; to?: number } }): Promise<PaperSearchResult[]>;
+  capabilities: ProviderCapabilities;
+  priority: number;
+  search(query: string, limit: number, options?: SearchFilterOptions): Promise<PaperSearchResult[]>;
   getDetails?(externalId: string): Promise<PaperSearchResult | null>;
   getCitations?(externalId: string, limit: number): Promise<PaperSearchResult[]>;
   getReferences?(externalId: string, limit: number): Promise<PaperSearchResult[]>;
+  resolveByDoi?(doi: string): Promise<PaperSearchResult | null>;
+  resolveDownloadUrl?(doi: string): Promise<string | null>;
 }
 
 export interface LibraryStats {

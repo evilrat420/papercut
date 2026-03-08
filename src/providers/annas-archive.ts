@@ -1,5 +1,5 @@
 import * as cheerio from 'cheerio';
-import type { PaperProvider, PaperSearchResult } from '../types.js';
+import type { PaperProvider, PaperSearchResult, ProviderCapabilities } from '../types.js';
 import { fetchWithRetry, RateLimiter } from '../utils/http.js';
 
 const DOMAINS = [
@@ -12,6 +12,16 @@ const DOMAINS = [
 export class AnnasArchiveProvider implements PaperProvider {
   id = 'annas-archive';
   name = "Anna's Archive";
+  capabilities: ProviderCapabilities = {
+    search: true,
+    details: true,
+    citations: false,
+    references: false,
+    download: true,
+    doiLookup: false,
+    oaDiscovery: false,
+  };
+  priority = 20;
 
   private rateLimiter = new RateLimiter(10, 60 * 1000);
 

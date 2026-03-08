@@ -1,4 +1,4 @@
-import type { PaperProvider, PaperSearchResult } from '../types.js';
+import type { PaperProvider, PaperSearchResult, ProviderCapabilities, SearchFilterOptions } from '../types.js';
 import { fetchWithRetry } from '../utils/http.js';
 
 const BASE_URL = 'https://api.crossref.org/works';
@@ -6,6 +6,16 @@ const BASE_URL = 'https://api.crossref.org/works';
 export class CrossRefProvider implements PaperProvider {
   id = 'crossref';
   name = 'CrossRef';
+  capabilities: ProviderCapabilities = {
+    search: true,
+    details: false,
+    citations: false,
+    references: false,
+    download: false,
+    doiLookup: true,
+    oaDiscovery: false,
+  };
+  priority = 3;
 
   private email?: string;
 
@@ -13,7 +23,22 @@ export class CrossRefProvider implements PaperProvider {
     this.email = email;
   }
 
-  async search(query: string, limit: number = 10, options?: { year?: number; yearRange?: { from?: number; to?: number } }): Promise<PaperSearchResult[]> {
+  async resolveByDoi(doi: string): Promise<PaperSearchResult | null> {
+    const headers: Record<string, string> = { 'Accept': 'application/json' };
+    if (this.email) {
+      headers['User-Agent'] = `papercut/2.0 (mailto:${this.email})`;
+    }
+    try {
+      const response = await fetchWithRetry(`${BASE_URL}/${encodeURIComponent(doi)}`, { headers });
+      const json = await response.json() as any;
+      if (!json.message) return null;
+      return this.mapItem(json.message);
+    } catch {
+      return null;
+    }
+  }
+
+  async search(query: string, limit: number = 10, options?: SearchFilterOptions): Promise<PaperSearchResult[]> {
     let url = `${BASE_URL}?query=${encodeURIComponent(query)}&rows=${Math.min(limit, 100)}`;
 
     if (options?.year) {

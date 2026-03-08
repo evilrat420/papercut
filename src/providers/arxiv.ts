@@ -1,4 +1,4 @@
-import type { PaperProvider, PaperSearchResult } from '../types.js';
+import type { PaperProvider, PaperSearchResult, ProviderCapabilities } from '../types.js';
 import { XMLParser } from 'fast-xml-parser';
 
 const BASE_URL = 'http://export.arxiv.org/api/query';
@@ -7,6 +7,16 @@ const REQUEST_DELAY_MS = 3000;
 export class ArxivProvider implements PaperProvider {
   id = 'arxiv';
   name = 'arXiv';
+  capabilities: ProviderCapabilities = {
+    search: true,
+    details: false,
+    citations: false,
+    references: false,
+    download: true,
+    doiLookup: false,
+    oaDiscovery: false,
+  };
+  priority = 2;
 
   private lastRequest = 0;
 

@@ -1,4 +1,4 @@
-import type { PaperProvider, PaperSearchResult } from '../types.js';
+import type { PaperProvider, PaperSearchResult, ProviderCapabilities, SearchFilterOptions } from '../types.js';
 import { RateLimiter, fetchWithRetry } from '../utils/http.js';
 
 const BASE_URL = 'https://api.semanticscholar.org/graph/v1';
@@ -7,6 +7,16 @@ const FIELDS = 'paperId,title,abstract,year,venue,authors,citationCount,openAcce
 export class SemanticScholarProvider implements PaperProvider {
   id = 'semantic-scholar';
   name = 'Semantic Scholar';
+  capabilities: ProviderCapabilities = {
+    search: true,
+    details: true,
+    citations: true,
+    references: true,
+    download: false,
+    doiLookup: true,
+    oaDiscovery: false,
+  };
+  priority = 0;
 
   private rateLimiter = new RateLimiter(100, 5 * 60 * 1000);
   private apiKey?: string;
@@ -21,7 +31,11 @@ export class SemanticScholarProvider implements PaperProvider {
     return h;
   }
 
-  async search(query: string, limit: number = 10, options?: { year?: number; yearRange?: { from?: number; to?: number } }): Promise<PaperSearchResult[]> {
+  async resolveByDoi(doi: string): Promise<PaperSearchResult | null> {
+    return this.getDetails(doi);
+  }
+
+  async search(query: string, limit: number = 10, options?: SearchFilterOptions): Promise<PaperSearchResult[]> {
     let url = `${BASE_URL}/paper/search?query=${encodeURIComponent(query)}&fields=${FIELDS}&limit=${Math.min(limit, 100)}`;
 
     if (options?.year) {
