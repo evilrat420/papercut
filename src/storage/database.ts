@@ -52,13 +52,37 @@ export class PaperDatabase {
       CREATE INDEX IF NOT EXISTS idx_papers_title ON papers(title);
     `);
 
-    // Migration: add file_format column if missing (for existing DBs)
-    const hasFormat = this.db.prepare(
-      `SELECT COUNT(*) as cnt FROM pragma_table_info('papers') WHERE name='file_format'`
-    ).get() as any;
-    if (!hasFormat?.cnt) {
-      this.db.exec(`ALTER TABLE papers ADD COLUMN file_format TEXT DEFAULT 'pdf'`);
-    }
+    // Migrations: add columns if missing (for existing DBs)
+    const addColumnIfMissing = (col: string, def: string) => {
+      const has = this.db.prepare(
+        `SELECT COUNT(*) as cnt FROM pragma_table_info('papers') WHERE name=?`
+      ).get(col) as any;
+      if (!has?.cnt) {
+        this.db.exec(`ALTER TABLE papers ADD COLUMN ${col} ${def}`);
+      }
+    };
+
+    addColumnIfMissing('file_format', "TEXT DEFAULT 'pdf'");
+    addColumnIfMissing('openalex_id', 'TEXT');
+    addColumnIfMissing('core_id', 'TEXT');
+    addColumnIfMissing('open_access', 'INTEGER DEFAULT 0');
+    addColumnIfMissing('oa_url', 'TEXT');
+
+    // Provider URLs table for multi-source URL tracking
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS provider_urls (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        paper_id INTEGER NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+        url TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        url_type TEXT NOT NULL DEFAULT 'pdf',
+        last_checked TEXT,
+        is_alive INTEGER DEFAULT 1,
+        added_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(paper_id, url)
+      );
+      CREATE INDEX IF NOT EXISTS idx_provider_urls_paper ON provider_urls(paper_id);
+    `);
 
     // FTS5 virtual table
     const ftsExists = this.db.prepare(
@@ -104,10 +128,12 @@ export class PaperDatabase {
     const stmt = this.db.prepare(`
       INSERT INTO papers (title, authors, year, abstract, venue, doi, arxiv_id, md5,
         file_path, file_size, page_count, full_text, summary, topics, key_findings,
-        methodology, provider, external_id, indexing_status, indexing_error, file_format)
+        methodology, provider, external_id, indexing_status, indexing_error, file_format,
+        openalex_id, core_id, open_access, oa_url)
       VALUES (@title, @authors, @year, @abstract, @venue, @doi, @arxiv_id, @md5,
         @file_path, @file_size, @page_count, @full_text, @summary, @topics, @key_findings,
-        @methodology, @provider, @external_id, @indexing_status, @indexing_error, @file_format)
+        @methodology, @provider, @external_id, @indexing_status, @indexing_error, @file_format,
+        @openalex_id, @core_id, @open_access, @oa_url)
     `);
 
     const result = stmt.run({
@@ -132,9 +158,26 @@ export class PaperDatabase {
       indexing_status: paper.indexing_status,
       indexing_error: paper.indexing_error ?? null,
       file_format: paper.file_format ?? 'pdf',
+      openalex_id: paper.openalex_id ?? null,
+      core_id: paper.core_id ?? null,
+      open_access: paper.open_access ? 1 : 0,
+      oa_url: paper.oa_url ?? null,
     });
 
     return result.lastInsertRowid as number;
+  }
+
+  addProviderUrl(paperId: number, url: string, provider: string, urlType: string = 'pdf'): void {
+    this.db.prepare(`
+      INSERT OR IGNORE INTO provider_urls (paper_id, url, provider, url_type)
+      VALUES (?, ?, ?, ?)
+    `).run(paperId, url, provider, urlType);
+  }
+
+  getProviderUrls(paperId: number): Array<{ url: string; provider: string; url_type: string; is_alive: boolean }> {
+    return (this.db.prepare(
+      'SELECT url, provider, url_type, is_alive FROM provider_urls WHERE paper_id = ? ORDER BY is_alive DESC'
+    ).all(paperId) as any[]).map(r => ({ ...r, is_alive: !!r.is_alive }));
   }
 
   search(query: string, limit: number = 10): IndexedPaper[] {

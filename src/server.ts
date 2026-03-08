@@ -15,8 +15,10 @@ import { extractText } from './indexing/text-extractor.js';
 import { HaikuIndexer } from './indexing/haiku-indexer.js';
 import { ProviderRegistry } from './providers/registry.js';
 import { SemanticScholarProvider } from './providers/semantic-scholar.js';
+import { OpenAlexProvider } from './providers/openalex.js';
 import { ArxivProvider } from './providers/arxiv.js';
 import { CrossRefProvider } from './providers/crossref.js';
+import { UnpaywallProvider } from './providers/unpaywall.js';
 import { AnnasArchiveProvider } from './providers/annas-archive.js';
 import type { PaperSearchResult, IndexedPaper } from './types.js';
 
@@ -112,8 +114,10 @@ export class PapercutServer {
     // Provider registry
     this.registry = new ProviderRegistry();
     this.registry.register(new SemanticScholarProvider(this.config.semanticScholarApiKey));
+    this.registry.register(new OpenAlexProvider(this.config.openalexEmail));
     this.registry.register(new ArxivProvider());
     this.registry.register(new CrossRefProvider(this.config.crossrefEmail));
+    this.registry.register(new UnpaywallProvider(this.config.unpaywallEmail));
     this.registry.register(new AnnasArchiveProvider());
 
     // Apply config overrides (enabled/disabled, priority)
@@ -127,12 +131,12 @@ export class PapercutServer {
       tools: [
         {
           name: 'search_papers',
-          description: 'Search for research papers across multiple sources (Semantic Scholar, arXiv, CrossRef, Anna\'s Archive). Returns titles, authors, abstracts, and download availability.',
+          description: 'Search for research papers across multiple sources (Semantic Scholar, OpenAlex, arXiv, CrossRef, Anna\'s Archive). Returns titles, authors, abstracts, and download availability.',
           inputSchema: {
             type: 'object',
             properties: {
               query: { type: 'string', description: 'Search query for papers' },
-              providers: { type: 'array', items: { type: 'string' }, description: 'Provider IDs to search: semantic-scholar, arxiv, crossref, annas-archive (default: all)' },
+              providers: { type: 'array', items: { type: 'string' }, description: 'Provider IDs to search: semantic-scholar, openalex, arxiv, crossref, annas-archive (default: all)' },
               limit: { type: 'number', description: 'Max results per provider (default: 10)' },
               year: { type: 'number', description: 'Filter to specific publication year' },
               yearRange: {
