@@ -6,3 +6,4 @@ papers/
 *.db-wal
 *.db-shm
 .env
+papercut.config.json

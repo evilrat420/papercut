@@ -1,0 +1,16 @@
+{
+  "email": "your-email@example.com",
+  "papersDir": "./papers",
+  "dataDir": "./data",
+  "semanticScholarApiKey": "",
+  "coreApiKey": "",
+  "providers": {
+    "semantic-scholar": { "enabled": true, "priority": 0 },
+    "openalex": { "enabled": true, "priority": 1 },
+    "arxiv": { "enabled": true, "priority": 2 },
+    "crossref": { "enabled": true, "priority": 3 },
+    "core": { "enabled": true, "priority": 5 },
+    "unpaywall": { "enabled": true, "priority": 10 },
+    "annas-archive": { "enabled": true, "priority": 20 }
+  }
+}
