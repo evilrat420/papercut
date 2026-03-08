@@ -20,6 +20,7 @@ import { ArxivProvider } from './providers/arxiv.js';
 import { CrossRefProvider } from './providers/crossref.js';
 import { UnpaywallProvider } from './providers/unpaywall.js';
 import { AnnasArchiveProvider } from './providers/annas-archive.js';
+import { CoreProvider } from './providers/core.js';
 import { SmartSearch } from './search/smart-search.js';
 import { UrlResolver } from './download/url-resolver.js';
 import type { PaperSearchResult, IndexedPaper } from './types.js';
@@ -128,6 +129,7 @@ export class PapercutServer {
     this.registry.register(new ArxivProvider());
     this.registry.register(new CrossRefProvider(this.config.crossrefEmail));
     this.registry.register(new UnpaywallProvider(this.config.unpaywallEmail));
+    this.registry.register(new CoreProvider(this.config.coreApiKey));
     this.registry.register(new AnnasArchiveProvider());
 
     // Apply config overrides (enabled/disabled, priority)

@@ -16,10 +16,8 @@ export class HaikuIndexer {
   }
 
   private findClaudeCli(): string {
-    // Check env override first
     if (process.env.CLAUDE_CLI) return process.env.CLAUDE_CLI;
 
-    // Common locations on Windows
     if (os.platform() === 'win32') {
       const candidates = [
         path.join(os.homedir(), '.local', 'bin', 'claude.exe'),
@@ -32,12 +30,11 @@ export class HaikuIndexer {
       }
     }
 
-    // Fall back to PATH
     return 'claude';
   }
 
   isAvailable(): boolean {
-    return true; // We'll find out on first call if CLI is accessible
+    return true;
   }
 
   async indexPaper(
@@ -72,7 +69,7 @@ Return ONLY valid JSON, no markdown fences or extra text.`;
 
   private callClaude(prompt: string): Promise<string> {
     return new Promise((resolve, reject) => {
-      // Filter env to avoid Claude Code conflicts (same pattern as obsidian_resident)
+      // Filter env to avoid Claude Code conflicts
       const env: Record<string, string> = {};
       for (const [k, v] of Object.entries(process.env)) {
         if (v !== undefined && !k.startsWith('CLAUDECODE') && !k.startsWith('CLAUDE_CODE')) {
@@ -80,7 +77,6 @@ Return ONLY valid JSON, no markdown fences or extra text.`;
         }
       }
 
-      // Spawn claude directly, pipe prompt via stdin
       const child = spawn(this.claudeCli, ['--model', 'haiku', '--print'], {
         env,
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -112,7 +108,6 @@ Return ONLY valid JSON, no markdown fences or extra text.`;
         reject(new Error(`Failed to spawn Haiku CLI: ${err.message}`));
       });
 
-      // Write prompt to stdin and close
       child.stdin.write(prompt);
       child.stdin.end();
     });
