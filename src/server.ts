@@ -20,6 +20,8 @@ import { ArxivProvider } from './providers/arxiv.js';
 import { CrossRefProvider } from './providers/crossref.js';
 import { UnpaywallProvider } from './providers/unpaywall.js';
 import { AnnasArchiveProvider } from './providers/annas-archive.js';
+import { SmartSearch } from './search/smart-search.js';
+import { UrlResolver } from './download/url-resolver.js';
 import type { PaperSearchResult, IndexedPaper } from './types.js';
 
 // --- Zod Schemas ---
@@ -78,6 +80,12 @@ const UpdatePaperIndexSchema = z.object({
   methodology: z.string().optional().describe('Brief description of methodology'),
 });
 
+const FindPaperSchema = z.object({
+  input: z.string().describe('DOI, arXiv ID, URL, Semantic Scholar ID, or paper title'),
+  download: z.boolean().optional().default(false).describe('Also download if found (default: false)'),
+  skipIndexing: z.boolean().optional().default(false).describe('Skip AI indexing after download (default: false)'),
+});
+
 // --- Server ---
 
 export class PapercutServer {
@@ -88,6 +96,8 @@ export class PapercutServer {
   private progress!: ProgressReporter;
   private indexer!: HaikuIndexer;
   private registry!: ProviderRegistry;
+  private smartSearch!: SmartSearch;
+  private urlResolver!: UrlResolver;
 
   constructor() {
     this.server = new Server(
@@ -124,6 +134,9 @@ export class PapercutServer {
     if (Object.keys(this.config.providers).length > 0) {
       this.registry.applyConfig(this.config.providers);
     }
+
+    this.smartSearch = new SmartSearch(this.registry, this.db);
+    this.urlResolver = new UrlResolver(this.registry);
   }
 
   private setupHandlers() {
@@ -234,7 +247,7 @@ export class PapercutServer {
         },
         {
           name: 'get_citations',
-          description: 'Get papers that cite a given paper (via Semantic Scholar).',
+          description: 'Get papers that cite a given paper. Cascades through all citation-capable providers.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -243,6 +256,24 @@ export class PapercutServer {
             },
             required: ['paperId'],
           },
+        },
+        {
+          name: 'find_paper',
+          description: 'Find a specific paper by DOI, arXiv ID, URL, or title. Searches across all providers and resolves identifiers. Optionally downloads the paper.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              input: { type: 'string', description: 'DOI (10.xxxx/xxxx), arXiv ID (2301.12345), URL, or paper title' },
+              download: { type: 'boolean', description: 'Download the paper if found (default: false)' },
+              skipIndexing: { type: 'boolean', description: 'Skip AI indexing after download (default: false)' },
+            },
+            required: ['input'],
+          },
+        },
+        {
+          name: 'list_providers',
+          description: 'List all available paper search providers with their status, capabilities, and coverage.',
+          inputSchema: { type: 'object', properties: {} },
         },
       ],
     }));
@@ -262,6 +293,8 @@ export class PapercutServer {
           case 'update_paper_index': return await this.handleUpdatePaperIndex(args);
           case 'reindex_paper': return await this.handleReindexPaper(args, progressToken);
           case 'get_citations': return await this.handleGetCitations(args);
+          case 'find_paper': return await this.handleFindPaper(args, progressToken);
+          case 'list_providers': return await this.handleListProviders();
           default:
             throw new Error(`Unknown tool: ${name}`);
         }
@@ -669,6 +702,138 @@ export class PapercutServer {
     }
 
     return { content: [{ type: 'text', text: 'No citations found across any provider.' }] };
+  }
+
+  private async handleFindPaper(args: any, progressToken?: string | number) {
+    const { input, download, skipIndexing } = FindPaperSchema.parse(args);
+
+    // Try resolving as identifier first
+    let paper = await this.smartSearch.resolve(input);
+
+    // If not an identifier, search by title
+    if (!paper) {
+      const searchResult = await this.smartSearch.search({ query: input, limit: 5 });
+      if (searchResult.results.length > 0) {
+        paper = searchResult.results[0];
+      }
+    }
+
+    if (!paper) {
+      return { content: [{ type: 'text', text: `No paper found for: "${input}"` }] };
+    }
+
+    let output = `# Found Paper\n\n${this.formatSearchResult(paper)}`;
+
+    // If download requested, resolve URLs and download
+    if (download) {
+      const urls = await this.urlResolver.resolveUrls(paper);
+      if (urls.length === 0) {
+        output += `\n**Download:** No accessible URLs found.`;
+      } else {
+        try {
+          const reportProgress = (p: any) => this.progress.report(progressToken, p);
+
+          // Check for duplicates first
+          const existing = this.db.findDuplicate(paper.doi, paper.md5, paper.title);
+          if (existing) {
+            output += `\n**Already in library** (ID: ${existing.id}), status: ${existing.indexing_status}`;
+          } else {
+            reportProgress({ phase: 'downloading', bytesDownloaded: 0, message: 'Starting download...' });
+            const { filePath, fileSize, format } = await this.downloader.download(urls, paper.title, reportProgress);
+
+            reportProgress({ phase: 'extracting', bytesDownloaded: fileSize, message: 'Extracting text...' });
+            const extraction = await extractText(filePath);
+
+            const paperId = this.db.insert({
+              title: paper.title,
+              authors: paper.authors,
+              year: paper.year,
+              abstract: paper.abstract,
+              venue: paper.venue,
+              doi: paper.doi,
+              arxiv_id: paper.arxivId,
+              md5: paper.md5,
+              file_path: filePath,
+              file_size: fileSize,
+              page_count: extraction.pageCount,
+              full_text: extraction.text,
+              file_format: format,
+              provider: paper.provider,
+              external_id: paper.externalId,
+              indexing_status: 'pending',
+            });
+
+            // Store all resolved URLs
+            for (const url of urls) {
+              this.db.addProviderUrl(paperId, url, paper.provider);
+            }
+
+            // Index with Haiku if not skipped
+            if (!skipIndexing && extraction.text.length > 100) {
+              try {
+                reportProgress({ phase: 'indexing', bytesDownloaded: fileSize, message: 'Indexing with Haiku...' });
+                const indexed = await this.indexer.indexPaper(extraction.text, {
+                  title: paper.title,
+                  authors: paper.authors,
+                  abstract: paper.abstract,
+                });
+                this.db.updateIndexing(paperId, {
+                  summary: indexed.summary,
+                  topics: indexed.keyTopics,
+                  key_findings: indexed.keyFindings,
+                  methodology: indexed.methodology,
+                  indexing_status: 'indexed',
+                });
+                output += `\n**Downloaded** (ID: ${paperId}) | ${extraction.pageCount} pages | Indexed`;
+              } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                this.db.markFailed(paperId, msg);
+                output += `\n**Downloaded** (ID: ${paperId}) | ${extraction.pageCount} pages | Indexing failed: ${msg}`;
+              }
+            } else {
+              output += `\n**Downloaded** (ID: ${paperId}) | ${extraction.pageCount} pages | Indexing skipped`;
+            }
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          output += `\n**Download failed:** ${msg}`;
+        }
+      }
+    }
+
+    return { content: [{ type: 'text', text: output }] };
+  }
+
+  private async handleListProviders() {
+    const providers = this.registry.listAll();
+
+    const COVERAGE: Record<string, string> = {
+      'semantic-scholar': '200M+ papers',
+      'openalex': '240M+ works',
+      'arxiv': '2.4M preprints',
+      'crossref': 'Publisher metadata',
+      'core': '125M+ OA papers',
+      'unpaywall': 'OA URL resolver',
+      'annas-archive': 'Books + papers',
+    };
+
+    let output = '# Paper Providers\n\n';
+    output += '| Provider | Status | Coverage | Capabilities |\n';
+    output += '|----------|--------|----------|-------------|\n';
+
+    for (const p of providers) {
+      const status = p.enabled ? 'Enabled' : 'Disabled';
+      const coverage = COVERAGE[p.id] || 'Unknown';
+      const caps = Object.entries(p.capabilities)
+        .filter(([, v]) => v)
+        .map(([k]) => k)
+        .join(', ');
+      output += `| ${p.name} | ${status} | ${coverage} | ${caps} |\n`;
+    }
+
+    output += `\n**Total enabled:** ${providers.filter(p => p.enabled).length}/${providers.length}\n`;
+
+    return { content: [{ type: 'text', text: output }] };
   }
 
   // --- Formatting ---
